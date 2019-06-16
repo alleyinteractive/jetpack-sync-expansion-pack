@@ -1,6 +1,6 @@
 <?php
 /**
- * This file contains provides interfaces to surface Jetpack Sync's status.
+ * This file provides interfaces to surface Jetpack Sync's status.
  *
  * @package JPSEP
  */
