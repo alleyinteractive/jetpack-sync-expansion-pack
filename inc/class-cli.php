@@ -74,26 +74,13 @@ class CLI {
 		return compact( 'confirmed', 'errors' );
 	}
 
-	/**
-	 * Audit the site against Jetpack ES.
-	 *
-	 * ## OPTIONS
-	 *
-	 * [--fix]
-	 * : If present, script will attempt to fix any posts that fail the audit.
-	 *
-	 * ## EXAMPLES
-	 *
-	 *     wp jetpack sync audit_posts
-	 */
-	public function audit_posts( $args, $assoc_args ) {
+	protected function run_audit_loop(): array {
 		$post_types = get_post_types( [ 'public' => true ] );
 		$errors     = [];
-		$fix        = ! empty( $assoc_args['fix'] );
 		$confirmed  = 0;
 		$queue      = [];
 
-		WP_CLI::line( 'Auditing published posts...' );
+		WP_CLI::line( sprintf( 'Auditing published posts for %s', home_url() ) );
 
 		$this->bulk_task(
 			[
@@ -128,15 +115,35 @@ class CLI {
 				'errors'    => $batch_errors,
 			] = $this->run_audit_queue( $queue );
 
-			// Reset the queue.
-			$queue = [];
-
 			$confirmed += $batch_confirmed;
 
 			foreach ( $batch_errors as $post_id => $reason ) {
 				$errors[] = compact( 'post_id', 'reason' );
 			}
 		}
+
+		return compact( 'confirmed', 'errors' );
+	}
+
+	/**
+	 * Audit the site against Jetpack ES.
+	 *
+	 * ## OPTIONS
+	 *
+	 * [--fix]
+	 * : If present, script will attempt to fix any posts that fail the audit.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp jetpack sync-ep audit_posts
+	 */
+	public function audit_posts( $args, $assoc_args ) {
+		$fix = ! empty( $assoc_args['fix'] );
+
+		[
+			'errors'    => $errors,
+			'confirmed' => $confirmed,
+		] = $this->run_audit_loop();
 
 		if ( ! empty( $errors ) ) {
 			WP_CLI::warning( sprintf( 'Audit failed! %d items failed the audit.', count( $errors ) ) );
@@ -173,5 +180,92 @@ class CLI {
 		} else {
 			WP_CLI::success( "Audit passed, {$confirmed} posts verified" );
 		}
+	}
+
+	/**
+	 * Audit every site in the current network against Jetpack ES.
+	 *
+	 * ## EXAMPLES
+	 *
+	 *     wp jetpack sync-ep audit_network
+	 */
+	public function audit_network( $args, $assoc_args ) {
+		if ( ! is_multisite() ) {
+			WP_CLI::error( 'This command can only be run on multisite installs' );
+		}
+
+		$summary = [];
+		$errors  = [];
+
+		$sites = get_sites( [
+			'public'   => null,
+			'archived' => 0,
+			'spam'     => 0,
+			'deleted'  => 0,
+			'fields'   => 'ids',
+		] );
+
+		// Instead of repeatedly calling restore_current_blog() just to switch again, manually switch back at the end
+		$starting_blog_id = get_current_blog_id();
+
+		foreach ( $sites as $site ) {
+			switch_to_blog( $site );
+
+			WP_CLI::line( sprintf( 'Starting %s (site %d)', home_url( '/' ), $site ) );
+
+			[
+				'errors'    => $site_errors,
+				'confirmed' => $site_confirmed,
+			] = $this->run_audit_loop();
+
+			// Add the site ID to each error entry.
+			if ( ! empty( $site_errors) ) {
+				foreach ( $site_errors as $error ) {
+					$error['site_id'] = $site;
+					$errors[] = $error;
+				}
+			}
+			$summary[] = [
+				'site_id'   => $site,
+				'confirmed' => $site_confirmed,
+				'errors'    => count( $site_errors ),
+			];
+
+			WP_CLI::line( sprintf( 'Completed %s', home_url( '/' ) ) );
+			WP_CLI::line( '' );
+		}
+
+		switch_to_blog( $starting_blog_id );
+
+		WP_CLI::line( '' );
+		WP_CLI::line( 'Audit Summary' );
+		WP_CLI::line( '#########################' );
+
+		format_items(
+			'table',
+			$summary,
+			[
+				'site_id',
+				'confirmed',
+				'errors',
+			]
+		);
+
+		if ( ! empty( $errors ) ) {
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Error Report' );
+			WP_CLI::line( '#########################' );
+
+			format_items(
+				'csv',
+				$errors,
+				[
+					'site_id',
+					'post_id',
+					'reason',
+				]
+			);
+		}
+
 	}
 }
