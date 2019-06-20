@@ -9,13 +9,10 @@ namespace JPSEP;
 
 use Exception;
 use function JPSEP\Dispatcher\sync_many_posts_synchronously;
-use function JPSEP\ES\audit_post;
-use function JPSEP\ES\get_post_data;
-use stdClass;
+use function JPSEP\ES\audit_posts;
 use WP_CLI;
 use function WP_CLI\Utils\format_items;
 use function WP_CLI\Utils\make_progress_bar;
-use WP_Post;
 
 require_once __DIR__ . '/trait-alley-cli-bulk-task.php';
 
@@ -53,6 +50,31 @@ class CLI {
 	}
 
 	/**
+	 * Run an iteration of the audit queue.
+	 *
+	 * @param array $posts WP_Post objects.
+	 * @return array {
+	 *     @type int   $confirmed Number of posts confirmed.
+	 *     @type array $errors    Array of failed audits, reasons indexed by
+	 *                            Post ID.
+	 * }
+	 */
+	protected function run_audit_queue( array $posts ): array {
+		$confirmed = 0;
+		try {
+			$errors = audit_posts( $posts );
+			if ( true === $errors ) {
+				$errors = [];
+			}
+			$confirmed = count( $posts ) - count( $errors );
+		} catch ( Exception $e ) {
+			WP_CLI::error( $e->getMessage() );
+		}
+
+		return compact( 'confirmed', 'errors' );
+	}
+
+	/**
 	 * Audit the site against Jetpack ES.
 	 *
 	 * ## OPTIONS
@@ -69,24 +91,52 @@ class CLI {
 		$errors     = [];
 		$fix        = ! empty( $assoc_args['fix'] );
 		$confirmed  = 0;
+		$queue      = [];
+
+		WP_CLI::line( 'Auditing published posts...' );
 
 		$this->bulk_task(
 			[
 				'post_type'   => $post_types,
 				'post_status' => 'publish',
 			],
-			function( $post ) use ( &$errors, &$confirmed ) {
-				try {
-					audit_post( $post );
-					$confirmed++;
-				} catch ( Exception $e ) {
-					$errors[] = [
-						'post_id' => $post->ID,
-						'reason'  => $e->getMessage(),
-					];
+			function( $post ) use ( &$errors, &$confirmed, &$queue ) {
+				$queue[] = $post;
+
+				if ( 100 === count( $queue ) ) {
+					[
+						'confirmed' => $batch_confirmed,
+						'errors'    => $batch_errors,
+					] = $this->run_audit_queue( $queue );
+
+					// Reset the queue.
+					$queue = [];
+
+					$confirmed += $batch_confirmed;
+
+					foreach ( $batch_errors as $post_id => $reason ) {
+						$errors[] = compact( 'post_id', 'reason' );
+					}
 				}
 			}
 		);
+
+		// Run the last batch if necessary.
+		if ( ! empty( $queue ) ) {
+			[
+				'confirmed' => $batch_confirmed,
+				'errors'    => $batch_errors,
+			] = $this->run_audit_queue( $queue );
+
+			// Reset the queue.
+			$queue = [];
+
+			$confirmed += $batch_confirmed;
+
+			foreach ( $batch_errors as $post_id => $reason ) {
+				$errors[] = compact( 'post_id', 'reason' );
+			}
+		}
 
 		if ( ! empty( $errors ) ) {
 			WP_CLI::warning( sprintf( 'Audit failed! %d items failed the audit.', count( $errors ) ) );
