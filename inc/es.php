@@ -19,6 +19,10 @@ use WP_Post;
  * @return array
  */
 function es_query( array $es_args ): array {
+	if ( ! isset( $es_args['authenticated_request'] ) ) {
+		$es_args['authenticated_request'] = true;
+	}
+
 	$jetpack_search = Jetpack_Search::instance();
 	$result         = $jetpack_search->search( $es_args );
 	if ( is_wp_error( $result ) ) {
